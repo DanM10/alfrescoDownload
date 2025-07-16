@@ -1,0 +1,18 @@
+{
+  "alfresco": {
+    "baseUrl": "http://192.168.1.89:8080/alfresco",
+    "username": "admin",
+    "password": "admin",
+    "nodeId": "57679899-a69d-4984-821f-21dc9ee2cc83"
+  },
+  "download": {
+    "localPath": "C:\\AlfrescoDownload",
+    "batchSize": 5,
+    "retryAttempts": 3,
+    "timeoutMs": 30000
+  },
+  "logging": {
+    "discoveryFile": "logs/discovery.json",
+    "progressFile": "logs/download-progress.txt"
+  }
+}
