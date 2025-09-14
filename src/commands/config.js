@@ -518,7 +518,7 @@ class ConfigManager {
         Helpers.showProgress('Conectando a la API...');
 
         try {
-            const projectUrl = `${systemConfig.api.baseUrl}/projects/${systemConfig.api.proyectoId}`;
+            const projectUrl = `${systemConfig.api.baseUrl}/proyecto/${systemConfig.api.proyectoId}`;
             console.log(chalk.gray(`   └─ URL: ${projectUrl}`));
 
             const result = await HttpClient.makeRequest(projectUrl, {

@@ -128,72 +128,107 @@ class MenuManager {
 
 
 
-    // Método para probar conectividad con el proyecto específico
-    async testProjectConnection(apiConfig) {
-        if (!apiConfig.proyectoId) {
-            Helpers.showWarning('Proyecto: No hay Proyecto ID configurado');
-            return false;
-        }
-
-        Helpers.showProgress(`Probando acceso al proyecto ${apiConfig.proyectoId}...`);
-
-        try {
-            const projectUrl = `${apiConfig.baseUrl}/projects/${apiConfig.proyectoId}`;
-
-            console.log(chalk.gray(`   └─ Conectando a: ${projectUrl}`));
-
-            const response = await axios.get(projectUrl, {
-                timeout: 10000,
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                validateStatus: function (status) {
-                    return status >= 200 && status < 300;
-                }
-            });
-
-            Helpers.showSuccess(`Proyecto: Acceso correcto (${response.status})`);
-
-            if (response.data) {
-                if (response.data.name) {
-                    console.log(chalk.gray(`   └─ Proyecto: ${response.data.name}`));
-                }
-                if (response.data.status) {
-                    console.log(chalk.gray(`   └─ Estado: ${response.data.status}`));
-                }
-            }
-
-            return true;
-
-        } catch (error) {
-            if (error.response?.status === 404) {
-                Helpers.showError(`Proyecto: ID '${apiConfig.proyectoId}' no encontrado`);
-            } else if (error.response?.status === 403) {
-                Helpers.showError('Proyecto: Acceso denegado - Verifica permisos');
-            } else {
-                Helpers.showError(`Proyecto: Error de conexión - ${error.message}`);
-            }
-            return false;
-        }
-    }
-
-
-
-
     async showProjectStatus() {
         Helpers.clearScreen();
         Helpers.showHeader('PROYECTO ACTUAL', '📊');
 
-        // TODO: Implementar cuando tengas el endpoint listo
-        console.log(chalk.gray('📝 Funcionalidad pendiente de implementación'));
-        console.log(chalk.blue('🔗 Se conectará con el endpoint del proyecto cuando esté disponible'));
+        try {
+            const projectConfig = await this.configManager.loadProjectConfig();
+            const systemConfig = await this.configManager.loadSystemConfig();
 
-        // Placeholder para mostrar estructura futura
-        console.log('\n' + chalk.cyan('📋 Información del proyecto:'));
-        console.log('   ├─ Nombre: ' + chalk.gray('Pendiente'));
-        console.log('   ├─ Estado: ' + chalk.gray('Pendiente'));
-        console.log('   ├─ Última actualización: ' + chalk.gray('Pendiente'));
-        console.log('   └─ Progreso: ' + chalk.gray('Pendiente'));
+            if (!projectConfig.projectData) {
+                console.log(chalk.yellow('📝 No hay datos del proyecto cargados'));
+                console.log(chalk.blue('💡 Usa "Configuraciones > Recargar datos del proyecto" para cargar desde la API\n'));
+
+                if (systemConfig.api.proyectoId) {
+                    const loadNow = await Helpers.confirmAction(
+                        '¿Deseas cargar los datos del proyecto ahora?',
+                        true
+                    );
+
+                    if (loadNow) {
+                        await this.configManager.refreshProjectData();
+                    }
+                } else {
+                    console.log(chalk.red('⚠️  Configura primero el Proyecto ID en Configuraciones > Sistema'));
+                }
+                return;
+            }
+
+            // Mostrar datos del proyecto
+            const project = projectConfig.projectData;
+            console.log(chalk.cyan('📋 Información del proyecto:\n'));
+
+            console.log(chalk.blue('   Datos básicos:'));
+            console.log(`      ├─ ID: ${chalk.green(project.id)}`);
+            console.log(`      ├─ Identificación: ${chalk.green(project.identificacion)}`);
+            console.log(`      ├─ Nombre: ${chalk.green(project.nombre)}`);
+            console.log(`      └─ Etapa: ${chalk.green(project.etapaProyecto || 'No definida')}\n`);
+
+            console.log(chalk.blue('   Integración:'));
+            console.log(`      ├─ Alfresco ID: ${chalk.green(project.alfrescoId)}`);
+            console.log(`      └─ Creado: ${chalk.gray(new Date(project.creado).toLocaleString())}\n`);
+
+            console.log(chalk.blue('   Estado de sincronización:'));
+            console.log(`      └─ Última actualización: ${chalk.gray(new Date(projectConfig.lastUpdated).toLocaleString())}\n`);
+
+            // Opciones del proyecto
+            const projectChoices = [
+                {
+                    name: '🔄 Recargar datos del proyecto',
+                    value: 'refresh'
+                },
+                {
+                    name: '📁 Explorar en Alfresco',
+                    value: 'explore-alfresco'
+                },
+                {
+                    name: '📊 Ver configuración completa',
+                    value: 'view-config'
+                },
+                Helpers.createSeparator(),
+                {
+                    name: '🔙 Volver al menú principal',
+                    value: 'back'
+                }
+            ];
+
+            const action = await Helpers.selectFromList('¿Qué deseas hacer?', projectChoices);
+
+            switch (action) {
+                case 'refresh':
+                    await this.configManager.refreshProjectData();
+                    await Helpers.waitForEnter();
+                    await this.showProjectStatus(); // Volver a mostrar
+                    break;
+                case 'explore-alfresco':
+                    await this.exploreProjectInAlfresco(project);
+                    break;
+                case 'view-config':
+                    await this.configManager.showCurrentConfig();
+                    break;
+                case 'back':
+                    break;
+            }
+
+        } catch (error) {
+            Helpers.showError(`Error cargando información del proyecto: ${error.message}`);
+        }
+    }
+
+// Nuevo método para explorar el proyecto en Alfresco
+    async exploreProjectInAlfresco(project) {
+        Helpers.clearScreen();
+        Helpers.showHeader('EXPLORAR EN ALFRESCO', '📁');
+
+        console.log(chalk.blue(`🔍 Explorando proyecto: ${project.nombre}`));
+        console.log(chalk.gray(`   └─ Alfresco ID: ${project.alfrescoId}\n`));
+
+        // TODO: Implementar exploración de Alfresco usando el alfrescoId
+        console.log(chalk.yellow('⚠️  Funcionalidad pendiente: explorar estructura en Alfresco'));
+        console.log(chalk.blue('💡 Se conectará con los módulos de discovery existentes'));
+
+        await Helpers.waitForEnter();
     }
 
     async showDownloadConfig() {
