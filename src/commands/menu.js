@@ -1,8 +1,8 @@
 import chalk from "chalk";
 import Helpers from "../utils/helpers.js";
 import ConfigManager from "./config.js";
-import axios from "axios";
 import {testAlfrescoConnection, testApiConnection} from "../utils/api.js";
+import AssetsDownloader from "../utils/assets-downloader.js";
 
 
 class MenuManager {
@@ -33,7 +33,7 @@ class MenuManager {
                 value: 'download-config'
             },
             {
-                name: chalk.cyan('⬇️  Iniciar Descarga') + ' - Iniciar o reanudar descarga',
+                name: chalk.cyan('⬇️  Iniciar Descarga') + ' - Descargar activos y archivos',
                 value: 'download'
             },
             Helpers.createSeparator(),
@@ -292,49 +292,134 @@ class MenuManager {
         console.log('   └─ Normalización de caracteres');
     }
 
+
     async startDownload() {
         Helpers.clearScreen();
         Helpers.showHeader('INICIAR DESCARGA', '⬇️');
 
-        // Validar configuración primero
-        const validation = await this.configManager.validateConfig();
-        if (!validation.isValid) {
-            Helpers.showError('No se puede iniciar la descarga. Problemas de configuración:');
-            validation.issues.forEach(issue => {
-                console.log(`   └─ ${chalk.red(issue)}`);
-            });
-            return;
-        }
-
-        const confirmDownload = await Helpers.confirmAction(
-            '¿Deseas iniciar el proceso de descarga?',
-            false
-        );
-
-        if (!confirmDownload) {
-            Helpers.showWarning('Descarga cancelada');
-            return;
-        }
-
         try {
-            Helpers.showProgress('Iniciando proceso de descarga...');
+            // Validar configuración del sistema
+            const systemValidation = await this.configManager.validateSystemConfig();
+            if (!systemValidation.isValid) {
+                Helpers.showError('No se puede iniciar la descarga. Problemas de configuración del sistema:');
+                systemValidation.issues.forEach(issue => {
+                    console.log(`   └─ ${chalk.red(issue)}`);
+                });
+                return;
+            }
 
-            // Primero ejecutar discovery
-            Helpers.showProgress('Ejecutando discovery...');
-            const discovery = new AlfrescoDiscovery();
-            await discovery.startDiscovery();
+            // Cargar configuraciones
+            const systemConfig = systemValidation.config;
+            const projectConfig = await this.configManager.loadProjectConfig();
 
-            // Luego iniciar descarga
-            Helpers.showProgress('Iniciando descarga...');
-            const downloader = new AlfrescoDownloader();
-            await downloader.startDownload();
+            // Validar configuración de descarga
+            if (!projectConfig.download.desde || !projectConfig.download.hasta) {
+                Helpers.showError('Configuración de descarga incompleta');
+                console.log(chalk.blue('💡 Configura los parámetros en: Configuraciones > Proyecto > Parámetros de descarga'));
+                return;
+            }
 
-            Helpers.showSuccess('Proceso de descarga completado');
+            // Mostrar resumen antes de comenzar
+            console.log(chalk.cyan('📋 Resumen de descarga:'));
+            console.log(`   ├─ Proyecto: ${chalk.green(systemConfig.api.proyectoId)}`);
+            console.log(`   ├─ Período: ${chalk.green(projectConfig.download.desde)} a ${chalk.green(projectConfig.download.hasta)}`);
+            console.log(`   ├─ Criterio: ${chalk.green(projectConfig.download.valor)}`);
+            console.log(`   └─ Cambiar nombres: ${projectConfig.download.cambiarNombre ? '✅' : '❌'}\n`);
+
+            // Opciones de descarga
+            const downloadChoices = [
+                {
+                    name: '📊 Descargar información de activos (API)',
+                    value: 'assets-info'
+                },
+                {
+                    name: '📁 Descargar archivos desde Alfresco (próximamente)',
+                    value: 'alfresco-files'
+                },
+                {
+                    name: '🔄 Proceso completo (información + archivos)',
+                    value: 'complete'
+                },
+                Helpers.createSeparator(),
+                {
+                    name: '🔙 Volver al menú principal',
+                    value: 'back'
+                }
+            ];
+
+            const downloadAction = await Helpers.selectFromList(
+                '¿Qué tipo de descarga deseas realizar?',
+                downloadChoices
+            );
+
+            switch (downloadAction) {
+                case 'assets-info':
+                    await this.downloadAssetsInfo(systemConfig, projectConfig);
+                    break;
+                case 'alfresco-files':
+                    await  this.downloadAlfrescoPhotos(systemConfig, projectConfig);
+                    break;
+                case 'complete':
+                    await this.downloadComplete(systemConfig, projectConfig);
+                    break;
+                case 'back':
+                    return;
+            }
 
         } catch (error) {
             Helpers.showError(`Error durante la descarga: ${error.message}`);
         }
     }
+
+
+    async downloadAssetsInfo(systemConfig, projectConfig) {
+        const assetsDownloader = new AssetsDownloader(systemConfig, projectConfig);
+        const success = await assetsDownloader.downloadAssetsInfo();
+
+        if (success) {
+            assetsDownloader.displayStats();
+
+            const continueToFiles = await Helpers.confirmAction(
+                '¿Deseas continuar con la descarga de archivos desde Alfresco?',
+                false
+            );
+
+            if (continueToFiles) {
+                Helpers.showWarning('Descarga de archivos desde Alfresco: Próximamente');
+            }
+        }
+    }
+
+    async downloadComplete(systemConfig, projectConfig) {
+        Helpers.showProgress('Iniciando proceso completo de descarga...');
+
+        console.log(chalk.blue('\n🔸 Paso 1: Descargando información de activos'));
+        const assetsDownloader = new AssetsDownloader(systemConfig, projectConfig);
+        const assetsSuccess = await assetsDownloader.downloadAssetsInfo();
+
+        if (assetsSuccess) {
+            console.log(chalk.blue('\n🔸 Paso 2: Descargando fotos desde Alfresco'));
+            await this.downloadAlfrescoPhotos(systemConfig, projectConfig, assetsDownloader.allAssets);
+        }
+    }
+    async downloadAlfrescoPhotos(systemConfig, projectConfig, assetsData = null) {
+        // Si no tenemos datos de activos, cargar desde archivo
+        if (!assetsData) {
+            const loadResult = await AssetsDownloader.loadAssetsData();
+            if (!loadResult.success) {
+                Helpers.showError('No se pudieron cargar los datos de activos');
+                console.log(chalk.blue('💡 Ejecuta primero "Descargar información de activos"'));
+                return false;
+            }
+            assetsData = loadResult.data;
+        }
+
+        const { default: AlfrescoDownloader } = await import('../utils/alfresco-downloader.js');
+        const alfrescoDownloader = new AlfrescoDownloader(systemConfig, projectConfig, assetsData);
+
+        return await alfrescoDownloader.downloadAllPhotos();
+    }
+
 }
 
 export default MenuManager

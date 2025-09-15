@@ -23,13 +23,14 @@ class ConfigManager {
                 proyectoId: ''
             }
         };
+
         this.defaultProjectConfig = {
             lastUpdated: null,
             projectData: null,
             filters: {
                 dateFrom: null,
                 dateTo: null,
-                dateType: 'modified' // 'created' or 'modified'
+                dateType: 'modified'
             },
             naming: {
                 pattern: '{originalName}',
@@ -38,12 +39,18 @@ class ConfigManager {
                 normalizeChars: true
             },
             download: {
+                desde: null,
+                hasta: null,
+                descargarActualizados: true,
+                valor: 'Codigo anterior',
+                cambiarNombre: true,
                 localPath: './downloads',
                 batchSize: 3,
                 retryAttempts: 3,
                 timeoutMs: 30000
             }
         };
+
     }
 
     async loadSystemConfig() {
@@ -449,46 +456,93 @@ class ConfigManager {
         }
     }
 
+
     async configureDownload() {
-        console.log(chalk.blue('\n⬇️ Configuración de Descarga\n'));
+        console.log(chalk.blue('\n⬇️ Configuración de Descarga de Activos\n'));
 
         const currentConfig = await this.loadProjectConfig();
+
+        // Validar que tengamos un proyecto configurado
+        const systemConfig = await this.loadSystemConfig();
+        if (!systemConfig.api.proyectoId) {
+            Helpers.showError('Primero debes configurar un Proyecto ID en Configuración del Sistema');
+            return;
+        }
 
         const downloadConfig = await inquirer.prompt([
             {
                 type: 'input',
+                name: 'desde',
+                message: 'Fecha desde (YYYY-MM-DD):',
+                default: currentConfig.download.desde || '2025-01-01',
+                validate: (input) => {
+                    if (!input.trim()) return 'La fecha desde es requerida';
+                    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+                    if (!dateRegex.test(input)) return 'Formato debe ser YYYY-MM-DD';
+                    const date = new Date(input);
+                    if (isNaN(date.getTime())) return 'Fecha inválida';
+                    return true;
+                }
+            },
+            {
+                type: 'input',
+                name: 'hasta',
+                message: 'Fecha hasta (YYYY-MM-DD):',
+                default: currentConfig.download.hasta || '2025-12-31',
+                validate: (input, answers) => {
+                    if (!input.trim()) return 'La fecha hasta es requerida';
+                    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+                    if (!dateRegex.test(input)) return 'Formato debe ser YYYY-MM-DD';
+                    const fechaHasta = new Date(input);
+                    if (isNaN(fechaHasta.getTime())) return 'Fecha inválida';
+
+                    // Validar que 'hasta' sea posterior o igual a 'desde'
+                    const fechaDesde = new Date(answers.desde);
+                    if (fechaHasta < fechaDesde) {
+                        return 'La fecha hasta debe ser posterior o igual a la fecha desde';
+                    }
+                    return true;
+                }
+            },
+            {
+                type: 'confirm',
+                name: 'descargarActualizados',
+                message: '¿Descargar elementos actualizados?',
+                default: currentConfig.download.descargarActualizados !== undefined ?
+                    currentConfig.download.descargarActualizados : true
+            },
+            {
+                type: 'list',
+                name: 'valor',
+                message: 'Criterio de descarga:',
+                default: currentConfig.download.valor || 'Codigo anterior',
+                choices: [
+                    { name: 'Código anterior', value: 'Codigo anterior' },
+                    { name: 'Etiqueta', value: 'etiqueta' },
+                    { name: 'Relevador', value: 'relevador' }
+                ]
+            },
+            {
+                type: 'confirm',
+                name: 'cambiarNombre',
+                message: '¿Cambiar nombres de archivos y carpetas?',
+                default: currentConfig.download.cambiarNombre !== undefined ?
+                    currentConfig.download.cambiarNombre : true
+            },
+            {
+                type: 'input',
                 name: 'localPath',
                 message: 'Ruta local para descargas:',
-                default: currentConfig.download.localPath,
+                default: currentConfig.download.localPath || './downloads',
                 validate: (input) => Helpers.validateNotEmpty(input, 'Ruta local')
             },
             {
                 type: 'number',
                 name: 'batchSize',
                 message: 'Descargas concurrentes:',
-                default: currentConfig.download.batchSize,
+                default: currentConfig.download.batchSize || 3,
                 validate: (input) => {
                     if (input < 1 || input > 10) return 'Debe ser entre 1 y 10';
-                    return true;
-                }
-            },
-            {
-                type: 'number',
-                name: 'retryAttempts',
-                message: 'Intentos de reintento:',
-                default: currentConfig.download.retryAttempts,
-                validate: (input) => {
-                    if (input < 1 || input > 5) return 'Debe ser entre 1 y 5';
-                    return true;
-                }
-            },
-            {
-                type: 'number',
-                name: 'timeoutMs',
-                message: 'Timeout (milisegundos):',
-                default: currentConfig.download.timeoutMs,
-                validate: (input) => {
-                    if (input < 5000) return 'Mínimo 5000ms';
                     return true;
                 }
             }
@@ -496,14 +550,33 @@ class ConfigManager {
 
         const updatedConfig = {
             ...currentConfig,
-            download: downloadConfig
+            download: {
+                ...currentConfig.download,
+                ...downloadConfig
+            }
         };
 
         const saved = await this.saveProjectConfig(updatedConfig);
         if (saved) {
             Helpers.showSuccess('Configuración de descarga guardada correctamente');
+
+            // Mostrar resumen de la configuración
+            console.log(chalk.cyan('\n📋 Resumen de configuración:'));
+            console.log(`   ├─ Período: ${chalk.green(downloadConfig.desde)} a ${chalk.green(downloadConfig.hasta)}`);
+            console.log(`   ├─ Descargar actualizados: ${downloadConfig.descargarActualizados ? chalk.green('Sí') : chalk.red('No')}`);
+            console.log(`   ├─ Criterio: ${chalk.green(downloadConfig.valor)}`);
+            console.log(`   ├─ Cambiar nombres: ${downloadConfig.cambiarNombre ? chalk.green('Sí') : chalk.red('No')}`);
+            console.log(`   └─ Ruta: ${chalk.green(downloadConfig.localPath)}`);
+
+            // Calcular aproximadamente cuántos días abarca
+            const fechaDesde = new Date(downloadConfig.desde);
+            const fechaHasta = new Date(downloadConfig.hasta);
+            const diffTime = Math.abs(fechaHasta - fechaDesde);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            console.log(chalk.gray(`\n   📅 Período configurado: ${diffDays} días`));
         }
     }
+
 
     async refreshProjectData() {
         console.log(chalk.blue('\n🔄 Cargando datos del proyecto...\n'));
@@ -584,6 +657,11 @@ class ConfigManager {
             console.log(`      └─ Normalizar: ${projectConfig.naming.normalizeChars ? '✅' : '❌'}`);
 
             console.log(chalk.blue('   Descarga:'));
+            console.log(`      ├─ Desde: ${Helpers.formatConfigValue(projectConfig.download.desde)}`);
+            console.log(`      ├─ Hasta: ${Helpers.formatConfigValue(projectConfig.download.hasta)}`);
+            console.log(`      ├─ Actualizados: ${projectConfig.download.descargarActualizados ? '✅' : '❌'}`);
+            console.log(`      ├─ Criterio: ${Helpers.formatConfigValue(projectConfig.download.valor)}`);
+            console.log(`      ├─ Cambiar nombres: ${projectConfig.download.cambiarNombre ? '✅' : '❌'}`);
             console.log(`      ├─ Ruta: ${Helpers.formatConfigValue(projectConfig.download.localPath)}`);
             console.log(`      ├─ Concurrencia: ${Helpers.formatConfigValue(projectConfig.download.batchSize)}`);
             console.log(`      └─ Timeout: ${Helpers.formatConfigValue(projectConfig.download.timeoutMs + 'ms')}`);
