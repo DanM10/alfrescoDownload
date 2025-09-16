@@ -3,6 +3,7 @@ import path from 'path';
 import chalk from 'chalk';
 import Helpers from './helpers.js';
 import HttpClient from './http-client.js';
+import ErrorLogger from "./error-logger.js";
 
 class AssetsDownloader {
     constructor(systemConfig, projectConfig) {
@@ -11,13 +12,20 @@ class AssetsDownloader {
         this.allAssets = [];
         this.downloadConfig = projectConfig.download;
         this.assetsDataPath = './data/assets-data.json';
+        this.errorLogger = new ErrorLogger();
     }
 
     async downloadAssetsInfo() {
         Helpers.clearScreen();
         Helpers.showHeader('DESCARGA DE INFORMACIÓN DE ACTIVOS', '📊');
 
-        // Validar configuración
+        const previousCheck = await this.checkPreviousDownload();
+
+        if (previousCheck.continue) {
+            Helpers.showSuccess(`Continuando descarga: ${previousCheck.pendingCount} activos pendientes`);
+            return true;
+        }
+
         if (!this.validateDownloadConfig()) {
             return false;
         }
@@ -39,16 +47,22 @@ class AssetsDownloader {
                 return false;
             }
 
-            // Iniciar descarga paginada
+            await this.errorLogger.logSession('=== NUEVA SESIÓN DE DESCARGA INICIADA ===');
+
             await this.downloadAllPages();
 
-            // Guardar datos
+            this.allAssets = this.allAssets.map(asset => ({
+                ...asset,
+                estaDescargada: false
+            }));
+
             await this.saveAssetsData();
 
             Helpers.showSuccess('Descarga de información de activos completada');
             return true;
 
         } catch (error) {
+            await this.errorLogger.logError({ etiqueta: 'SYSTEM', alfrescoId: 'N/A' }, error, 'assets-download');
             Helpers.showError(`Error durante la descarga: ${error.message}`);
             return false;
         }
@@ -207,7 +221,7 @@ class AssetsDownloader {
             chunkSize: chunkSize
         }, { spaces: 2 });
 
-        // Guardar chunks
+        // Guardar chunks silenciosamente
         for (let i = 0; i < chunks; i++) {
             const start = i * chunkSize;
             const end = start + chunkSize;
@@ -215,10 +229,9 @@ class AssetsDownloader {
 
             const chunkPath = `./data/assets-chunk-${i + 1}.json`;
             await fs.writeJson(chunkPath, chunk, { spaces: 2 });
-
-            console.log(chalk.blue(`💾 Chunk ${i + 1}/${chunks} guardado: ${chunk.length} elementos`));
         }
 
+        // Solo el resumen final
         console.log(chalk.green(`💾 Datos guardados en ${chunks} archivos + metadata`));
     }
 
@@ -277,6 +290,66 @@ class AssetsDownloader {
         } catch (error) {
             return { success: false, message: error.message };
         }
+    }
+
+    async markAssetAsDownloaded(assetIndex, downloaded = true) {
+        try {
+            this.allAssets[assetIndex].estaDescargada = downloaded;
+            await this.saveAssetsData();
+        } catch (error) {
+            console.log(chalk.yellow(`⚠️ No se pudo actualizar estado del activo: ${error.message}`));
+        }
+    }
+
+    getPendingAssets() {
+        return this.allAssets.filter(asset => !asset.estaDescargada);
+    }
+
+    async continueDownload() {
+        const pendingAssets = this.getPendingAssets();
+
+        if (pendingAssets.length === 0) {
+            console.log(chalk.green('✅ No hay activos pendientes por descargar'));
+            return true;
+        }
+
+        console.log(chalk.cyan(`🔄 Continuando descarga: ${pendingAssets.length} activos pendientes`));
+
+        // Actualizar stats para mostrar progreso correcto
+        const completedAssets = this.allAssets.filter(asset => asset.estaDescargada);
+        console.log(chalk.blue(`📊 Progreso previo: ${completedAssets.length}/${this.allAssets.length} activos completados`));
+
+        return true;
+    }
+
+    async checkPreviousDownload() {
+        const loadResult = await this.loadSavedAssetsData();
+
+        if (loadResult.success && loadResult.data.length > 0) {
+            const pendingAssets = loadResult.data.filter(asset => !asset.estaDescargada);
+            const completedAssets = loadResult.data.filter(asset => asset.estaDescargada);
+
+            if (completedAssets.length > 0) {
+                console.log(chalk.yellow(`🔍 Descarga previa detectada:`));
+                console.log(`   ├─ Total de activos: ${loadResult.data.length}`);
+                console.log(`   ├─ Completados: ${chalk.green(completedAssets.length)}`);
+                console.log(`   └─ Pendientes: ${chalk.blue(pendingAssets.length)}`);
+
+                if (pendingAssets.length > 0) {
+                    const shouldContinue = await Helpers.confirmAction(
+                        '¿Deseas continuar la descarga desde donde se interrumpió?',
+                        true
+                    );
+
+                    if (shouldContinue) {
+                        this.allAssets = loadResult.data;
+                        return { continue: true, pendingCount: pendingAssets.length };
+                    }
+                }
+            }
+        }
+
+        return { continue: false, pendingCount: 0 };
     }
 
     static async loadAssetsData() {

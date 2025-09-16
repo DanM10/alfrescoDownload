@@ -4,6 +4,7 @@ import path from 'path';
 import chalk from 'chalk';
 import Helpers from './helpers.js';
 import HttpClient from './http-client.js';
+import ErrorLogger from "./error-logger.js";
 
 class AlfrescoDownloader {
     constructor(systemConfig, projectConfig, assetsData) {
@@ -11,6 +12,7 @@ class AlfrescoDownloader {
         this.projectConfig = projectConfig;
         this.assetsData = assetsData;
         this.downloadConfig = projectConfig.download;
+        this.errorLogger = new ErrorLogger();
         this.stats = {
             totalAssets: 0,
             processedAssets: 0,
@@ -21,6 +23,17 @@ class AlfrescoDownloader {
         };
     }
 
+    async saveAssetsProgress() {
+        try {
+            const AssetsDownloader = (await import('./assets-downloader.js')).default;
+            const assetsDownloader = new AssetsDownloader(this.systemConfig, this.projectConfig);
+            assetsDownloader.allAssets = this.assetsData;
+            await assetsDownloader.saveAssetsData();
+        } catch (error) {
+            console.log(chalk.yellow(`⚠️ No se pudo guardar progreso: ${error.message}`));
+        }
+    }
+
     async downloadAllPhotos() {
         Helpers.clearScreen();
         Helpers.showHeader('DESCARGA DE FOTOS DESDE ALFRESCO', '📷');
@@ -29,24 +42,42 @@ class AlfrescoDownloader {
             return false;
         }
 
+        const pendingAssets = this.assetsData.filter(asset => !asset.estaDescargada);
+        const completedAssets = this.assetsData.filter(asset => asset.estaDescargada);
+
         this.stats.totalAssets = this.assetsData.length;
-        console.log(chalk.cyan(`📊 Iniciando descarga de fotos para ${this.stats.totalAssets} activos\n`));
+        this.stats.resumed = completedAssets.length;
+
+        console.log(chalk.cyan(`📊 Estado de descarga:`));
+        console.log(`   ├─ Total de activos: ${this.stats.totalAssets}`);
+        console.log(`   ├─ Ya completados: ${chalk.green(completedAssets.length)}`);
+        console.log(`   └─ Por descargar: ${chalk.blue(pendingAssets.length)}\n`);
+
+        if (pendingAssets.length === 0) {
+            console.log(chalk.green('🎉 ¡Todos los activos ya han sido descargados!'));
+            return true;
+        }
 
         try {
-            // Crear directorio base
             await fs.ensureDir(this.downloadConfig.localPath);
 
-            // Procesar cada activo
-            for (let i = 0; i < this.assetsData.length; i++) {
-                const asset = this.assetsData[i];
-                await this.processAsset(asset, i + 1);
+            await this.errorLogger.logSession(`Iniciando descarga de fotos: ${pendingAssets.length} activos pendientes`);
 
-                // Mostrar progreso cada 10 activos
-                if ((i + 1) % 10 === 0 || i === this.assetsData.length - 1) {
-                    this.showProgress();
+            for (let i = 0; i < pendingAssets.length; i++) {
+                const asset = pendingAssets[i];
+                const originalIndex = this.assetsData.findIndex(a => a.alfrescoId === asset.alfrescoId);
+
+                const success = await this.processAsset(asset, i + 1, pendingAssets.length);
+
+                if (success) {
+                    this.assetsData[originalIndex].estaDescargada = true;
+                    await this.saveAssetsProgress();
                 }
 
-                // Pausa pequeña para no saturar el servidor
+                if ((i + 1) % 10 === 0 || i === pendingAssets.length - 1) {
+                    this.showProgress(pendingAssets.length);
+                }
+
                 await this.sleep(100);
             }
 
@@ -54,6 +85,7 @@ class AlfrescoDownloader {
             return true;
 
         } catch (error) {
+            await this.errorLogger.logError({ etiqueta: 'SYSTEM', alfrescoId: 'N/A' }, error, 'photo-download');
             Helpers.showError(`Error durante la descarga: ${error.message}`);
             return false;
         }
@@ -79,17 +111,18 @@ class AlfrescoDownloader {
         return true;
     }
 
-    async processAsset(asset, index) {
+    async processAsset(asset, currentIndex, totalPending) {
         try {
-            console.log(chalk.blue(`\n[${index}/${this.stats.totalAssets}] Procesando: ${asset.etiqueta}`));
+            console.log(chalk.blue(`\n[${currentIndex}/${totalPending}] Procesando: ${asset.etiqueta}`));
 
             // Obtener contenido de la carpeta del activo
             const folderContent = await this.getFolderContent(asset.alfrescoId);
 
             if (!folderContent.success) {
                 console.log(chalk.red(`   └─ Error obteniendo contenido: ${folderContent.message}`));
+                await this.errorLogger.logError(asset, new Error(folderContent.message), 'folder-access');
                 this.stats.errors++;
-                return;
+                return false;
             }
 
             const files = folderContent.files;
@@ -97,7 +130,7 @@ class AlfrescoDownloader {
             if (files.length === 0) {
                 console.log(chalk.yellow(`   └─ Sin archivos en la carpeta`));
                 this.stats.skipped++;
-                return;
+                return true;
             }
 
             console.log(chalk.gray(`   └─ Encontrados ${files.length} archivo(s)`));
@@ -107,14 +140,16 @@ class AlfrescoDownloader {
             await fs.ensureDir(targetFolder);
 
             // Descargar cada archivo
+            let downloadedFilesCount = 0;
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 const targetFileName = this.createTargetFileName(asset, file, i + 1);
                 const targetPath = path.join(targetFolder, targetFileName);
 
-                const downloaded = await this.downloadFile(file, targetPath);
+                const downloaded = await this.downloadFile(file, targetPath, asset);
                 if (downloaded) {
                     this.stats.downloadedPhotos++;
+                    downloadedFilesCount++;
                 } else {
                     this.stats.errors++;
                 }
@@ -123,9 +158,13 @@ class AlfrescoDownloader {
             this.stats.processedAssets++;
             this.stats.totalPhotos += files.length;
 
+            return downloadedFilesCount > 0 || files.length === 0;
+
         } catch (error) {
             console.log(chalk.red(`   └─ Error procesando activo: ${error.message}`));
+            await this.errorLogger.logError(asset, error, 'asset-processing');
             this.stats.errors++;
+            return false;
         }
     }
 
@@ -166,7 +205,7 @@ class AlfrescoDownloader {
         }
     }
 
-    async downloadFile(fileInfo, targetPath) {
+    async downloadFile(fileInfo, targetPath, asset) {
         try {
             const url = `${this.systemConfig.alfresco.baseUrl}/api/-default-/public/alfresco/versions/1/nodes/${fileInfo.id}/content`;
 
@@ -202,18 +241,22 @@ class AlfrescoDownloader {
                         resolve(true);
                     });
 
-                    writer.on('error', (error) => {
+                    writer.on('error', async (error) => {
                         console.log(chalk.red(`      └─ Error guardando: ${error.message}`));
+                        await this.errorLogger.logError(asset, error, 'file-save');
                         resolve(false);
                     });
                 });
             } else {
+                const error = new Error(result.message);
                 console.log(chalk.red(`      └─ Error descargando: ${result.message}`));
+                await this.errorLogger.logError(asset, error, 'file-download');
                 return false;
             }
 
         } catch (error) {
             console.log(chalk.red(`      └─ Error: ${error.message}`));
+            await this.errorLogger.logError(asset, error, 'file-download');
             return false;
         }
     }
@@ -247,10 +290,13 @@ class AlfrescoDownloader {
         return name.replace(/[<>:"/\\|?*]/g, '_').trim();
     }
 
-    showProgress() {
-        const processedPercent = ((this.stats.processedAssets / this.stats.totalAssets) * 100).toFixed(1);
+    showProgress(totalPending) {
+        const processedPercent = ((this.stats.processedAssets / totalPending) * 100).toFixed(1);
 
-        console.log(chalk.cyan(`\n📊 Progreso: ${this.stats.processedAssets}/${this.stats.totalAssets} activos (${processedPercent}%)`));
+        console.log(chalk.cyan(`\n📊 Progreso: ${this.stats.processedAssets}/${totalPending} activos pendientes (${processedPercent}%)`));
+        if (this.stats.resumed > 0) {
+            console.log(chalk.blue(`   ├─ Previamente completados: ${this.stats.resumed}`));
+        }
         console.log(chalk.blue(`   ├─ Fotos descargadas: ${this.stats.downloadedPhotos}`));
         console.log(chalk.yellow(`   ├─ Errores: ${this.stats.errors}`));
         console.log(chalk.gray(`   └─ Sin archivos: ${this.stats.skipped}`));
@@ -259,7 +305,11 @@ class AlfrescoDownloader {
     showFinalStats() {
         console.log(chalk.green('\n🎉 Descarga de fotos completada!'));
         console.log(chalk.cyan('\n📊 Estadísticas finales:'));
-        console.log(`   ├─ Activos procesados: ${this.stats.processedAssets}/${this.stats.totalAssets}`);
+        console.log(`   ├─ Total de activos: ${this.stats.totalAssets}`);
+        if (this.stats.resumed > 0) {
+            console.log(`   ├─ Previamente completados: ${chalk.blue(this.stats.resumed)}`);
+        }
+        console.log(`   ├─ Activos procesados en esta sesión: ${this.stats.processedAssets}`);
         console.log(`   ├─ Total de fotos: ${this.stats.totalPhotos}`);
         console.log(`   ├─ Fotos descargadas: ${this.stats.downloadedPhotos}`);
         console.log(`   ├─ Errores: ${this.stats.errors}`);
@@ -267,7 +317,8 @@ class AlfrescoDownloader {
         console.log(`   └─ Ruta de descarga: ${this.downloadConfig.localPath}`);
 
         if (this.stats.errors > 0) {
-            console.log(chalk.yellow(`\n⚠️  Se produjeron ${this.stats.errors} errores durante la descarga`));
+            console.log(chalk.yellow(`\n⚠️ Se produjeron ${this.stats.errors} errores durante la descarga`));
+            console.log(chalk.blue('📝 Revisa los logs en: ./logs/download-errors.json'));
         }
     }
 
